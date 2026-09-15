@@ -18,19 +18,19 @@ Builds use the local Keychain certificate `ABR Shortcut Local Development`. Set 
 
 For a temporary ad-hoc build, use `SIGNING_IDENTITY=- ./build.sh`. Each changed ad-hoc build needs a fresh Accessibility grant.
 
-Move `build/ABR Shortcut.app` to `~/Applications` and open it. Choose **Allow Accessibility…** from its menu and enable **ABR Shortcut** in System Settings once. If upgrading from an ad-hoc build, remove the old Accessibility entry and add the installed app once. An enabled toggle for an old signature does not authorize the new build.
+Move `build/ABR Shortcut.app` to `~/Applications` and open it. Click **Enable Admin**. If Accessibility is missing, the app prompts you and opens System Settings; enable **ABR Shortcut** there, then click **Enable Admin** again. If upgrading from an ad-hoc build, remove the old Accessibility entry and add the installed app once. An enabled toggle for an old signature does not authorize the new build.
 
 ABR Shortcut runs alongside ABR and depends on it for privileges, policy, authentication, and auditing. Quitting the shortcut does not end an admin session. It does not uninstall or disable ABR.
 
 ## Scope
 
-Targets the English ABR 5.3.4 dialogs on this Mac, including the exact BITS approval notice. Unknown prompts and authentication need attention in ABR. Status comes from ABR's accessible menu; unavailable Accessibility access is reported as unknown.
+Targets the English ABR 5.3.4 dialogs on this Mac, including the exact BITS approval notice. Unknown prompts and authentication need attention in ABR. Status comes from ABR's accessible menu; missing Accessibility access is requested when you click **Enable Admin**.
 
 The Swift app has no third-party dependencies.
 
 ## Verify the flow
 
-Build with `VERIFY_CYCLE=1 ./build.sh` and install that test build. With no active admin session, quit the shortcut and run:
+Build with `VERIFY_CYCLE=1 ./build.sh` and install that test build. With no active admin session, quit the shortcut using Activity Monitor and run:
 
 ```sh
 open --stdout /tmp/abr-verify.log --stderr /tmp/abr-verify.log \

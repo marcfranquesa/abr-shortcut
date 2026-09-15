@@ -69,16 +69,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         action.target = self
         menu.addItem(action)
         menu.addItem(.separator())
-        let permission = NSMenuItem(title: "Allow Accessibility…", action: #selector(allowAccessibility), keyEquivalent: "")
-        permission.target = self
-        menu.addItem(permission)
         let show = NSMenuItem(title: "Show Admin By Request", action: #selector(showABR), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit ABR Shortcut", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
         item.menu = menu
         tick()
         timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
@@ -219,12 +212,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch state {
             case .active: action.title = "Stop Admin"
             case .inactive: action.title = "Enable Admin"
-            case .permissionRequired: action.title = "Accessibility access required"
+            case .permissionRequired: action.title = "Enable Admin"
             case .unknown: action.title = "Cannot read Admin By Request status"
             case .unavailable: action.title = "Admin By Request is not running"
             }
         }
-        action.isEnabled = !busy && (state == .active || state == .inactive)
+        action.isEnabled = !busy && (state == .active || state == .inactive || state == .permissionRequired)
         if action.title != lastReport {
             NSLog("ABR Shortcut: %@", action.title)
             lastReport = action.title
@@ -268,6 +261,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func toggle() {
         tick()
+        if state == .permissionRequired {
+            allowAccessibility()
+            return
+        }
         if state == .active { _ = begin(.stop) }
         else if state == .inactive { _ = begin(.enable) }
     }
@@ -308,12 +305,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let error { DispatchQueue.main.async { self.fail(error.localizedDescription) } }
             }
     }
-    @objc func allowAccessibility() {
+    func allowAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
-    @objc func quit() { NSApp.terminate(nil) }
     func fail(_ message: String) {
         if verifying {
             verificationStage = -1
