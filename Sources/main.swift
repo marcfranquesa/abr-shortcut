@@ -38,7 +38,7 @@ func press(_ element: AXUIElement) throws {
     }
 }
 enum Failure: Error { case message(String) }
-enum SessionState { case unavailable, unknown, inactive, active }
+enum SessionState { case unavailable, permissionRequired, unknown, inactive, active }
 enum Operation { case enable, stop }
 
 final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -53,6 +53,14 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastFinish = Date.distantPast
     var stoppedSamples = 0
     var timer: Timer?
+    var lastReport = ""
+    var verificationStage = 0
+    #if VERIFICATION
+    let verifying = CommandLine.arguments.contains("--verify-cycle")
+    #else
+    let verifying = false
+    #endif
+    let verificationDeadline = Date().addingTimeInterval(660)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
@@ -87,9 +95,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return (app, windows)
     }
 
+    func menuItem(_ app: NSRunningApplication, _ title: String) -> AXUIElement? {
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let value = attribute(root, "AXExtrasMenuBar"), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return descendants(value as! AXUIElement).first {
+            string($0, kAXRoleAttribute) == kAXMenuItemRole && string($0, kAXTitleAttribute).lowercased() == title.lowercased()
+        }
+    }
+
     func tick() {
         guard let (app, windows) = snapshot() else {
-            state = NSRunningApplication.runningApplications(withBundleIdentifier: abrID).isEmpty ? .unavailable : .unknown
+            state = !AXIsProcessTrusted() ? .permissionRequired :
+                NSRunningApplication.runningApplications(withBundleIdentifier: abrID).isEmpty ? .unavailable : .unknown
             if operation != nil && (state == .unavailable || !AXIsProcessTrusted() || Date() > deadline) {
                 fail("Cannot read Admin By Request. Check that it is running and Accessibility is allowed.")
             }
@@ -97,7 +114,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let session = windows.first { string($0, kAXTitleAttribute) == "Administrator Access" && button($0, "Finish") != nil }
-        state = session == nil ? .inactive : .active
+        if menuItem(app, "End administrator access") != nil { state = .active }
+        else if menuItem(app, "Request administrator access") != nil { state = .inactive }
+        else { state = .unknown }
         if let operation {
             if Date() > deadline {
                 fail("The operation has not completed. Check Admin By Request for authentication, approval, or an unfamiliar prompt.")
@@ -112,11 +131,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func advance(_ operation: Operation, app: NSRunningApplication, windows: [AXUIElement], session: AXUIElement?) throws {
         switch operation {
         case .enable:
-            if let session {
-                guard AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success else {
-                    return
+            if state == .active {
+                if menuItem(app, "Show timer window") != nil {
+                    self.operation = nil
+                } else if let session {
+                    _ = AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
                 }
-                self.operation = nil
                 return
             }
             for window in windows {
@@ -164,17 +184,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let confirmation = windows.first(where: { hasText($0, "Are you done with your administrator session?") }), let yes = button(confirmation, "Yes") {
                 try press(yes)
                 stoppedSamples = 0
-            } else if let session {
+            } else if state == .active {
                 stoppedSamples = 0
-                if attribute(session, kAXMinimizedAttribute) as? Bool == true {
-                    AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                    return
-                }
-                if Date().timeIntervalSince(lastFinish) > 2, let finish = button(session, "Finish") {
-                    try press(finish)
+                if Date().timeIntervalSince(lastFinish) > 2, let end = menuItem(app, "End administrator access") {
+                    try press(end)
                     lastFinish = Date()
                 }
-            } else {
+            } else if state == .inactive {
                 // Require consecutive observations so a window transition isn't reported as completion.
                 stoppedSamples += 1
                 if stoppedSamples >= 3 { self.operation = nil }
@@ -203,21 +219,64 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch state {
             case .active: action.title = "Stop Admin"
             case .inactive: action.title = "Enable Admin"
-            case .unknown: action.title = "Status unavailable — allow Accessibility"
+            case .permissionRequired: action.title = "Accessibility access required"
+            case .unknown: action.title = "Cannot read Admin By Request status"
             case .unavailable: action.title = "Admin By Request is not running"
             }
         }
         action.isEnabled = !busy && (state == .active || state == .inactive)
+        if action.title != lastReport {
+            NSLog("ABR Shortcut: %@", action.title)
+            lastReport = action.title
+        }
+        if verifying { DispatchQueue.main.async { self.verifyCycle() } }
         let symbol = busy ? "ellipsis.circle" : state == .active ? "checkmark.shield.fill" : "shield"
         item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ABR Shortcut: \(action.title)")
         item.button?.toolTip = "ABR Shortcut — \(action.title)"
     }
 
-    @objc func toggle() {
+    // Explicit opt-in smoke test; refuse to disturb a pre-existing admin session.
+    func verifyCycle() {
+        guard verificationStage >= 0 else { return }
+        if Date() > verificationDeadline || state == .permissionRequired || state == .unavailable {
+            verificationStage = -1
+            NSLog("VERIFY FAILED: unavailable or timed out; check ABR for a pending or active session")
+            exit(EXIT_FAILURE)
+        }
         guard operation == nil else { return }
+        switch verificationStage {
+        case 0:
+            if state == .unknown { return }
+            guard state == .inactive else {
+                verificationStage = -1
+                NSLog("VERIFY REFUSED: start from an inactive session")
+                exit(EXIT_FAILURE)
+            }
+            if begin(.enable) { verificationStage = 1 }
+        case 1:
+            guard state == .active, let (app, _) = snapshot(), menuItem(app, "Show timer window") != nil else { return }
+            NSLog("VERIFY: enabled and timer minimized")
+            if begin(.stop) { verificationStage = 2 }
+        case 2:
+            guard state == .inactive else { return }
+            verificationStage = -1
+            NSLog("VERIFY PASSED: enabled, hid timer, stopped, returned to Enable Admin")
+            exit(EXIT_SUCCESS)
+        default: break
+        }
+    }
+
+    @objc func toggle() {
         tick()
-        guard state == .active || state == .inactive else { return }
-        operation = state == .active ? .stop : .enable
+        if state == .active { _ = begin(.stop) }
+        else if state == .inactive { _ = begin(.enable) }
+    }
+    @discardableResult
+    func begin(_ requested: Operation) -> Bool {
+        guard operation == nil else { return false }
+        tick()
+        guard (requested == .enable && state == .inactive) || (requested == .stop && state == .active) else { return false }
+        operation = requested
         deadline = Date().addingTimeInterval(30)
         typedReason = false
         submittedReason = false
@@ -225,6 +284,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stoppedSamples = 0
         if operation == .enable { requestAdmin() }
         updateMenu()
+        return operation == requested
     }
     @objc func showABR() {
         if let (app, windows) = snapshot() {
@@ -255,6 +315,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func quit() { NSApp.terminate(nil) }
     func fail(_ message: String) {
+        if verifying {
+            verificationStage = -1
+            NSLog("VERIFY FAILED: %@; check ABR for a pending or active session", message)
+            exit(EXIT_FAILURE)
+        }
         operation = nil
         updateMenu()
         DispatchQueue.main.async {
