@@ -22,7 +22,7 @@ Targets the English ABR 5.3.4 dialogs on this Mac, including the exact BITS appr
 
 The Swift app has no third-party dependencies.
 
-The workflow polls every 0.1 seconds while enabling or stopping, and every 0.5 seconds when idle. Each check reads the native menu once. Stop completes after one second of observed inactive status; an active or unreadable status restarts that check.
+The workflow polls every 0.1 seconds while enabling or stopping, and every 60 seconds while admin is active, with no polling while inactive. Each check reads the native menu once. Stop completes after one second of observed inactive status; an active or unreadable status restarts that check.
 
 ## Verify the flow
 
@@ -34,3 +34,7 @@ open --stdout /tmp/abr-verify.log --stderr /tmp/abr-verify.log \
 ```
 
 This opt-in test starts a real session, checks that its timer is minimized, stops it, and exits. It refuses an already-active session. Read `/tmp/abr-verify.log` for `VERIFY PASSED` or the failure; reopen the app normally afterward. Normal runs also log status changes to the macOS console. The verification flag is disabled in normal builds; rebuild with `./build.sh` after testing.
+
+## Status checks
+
+Check once on launch and whenever the menu opens. While admin is off, no timer runs; sessions started directly in ABR are detected on the next manual refresh or launch. Enable and Stop flows check every 100 ms. After enabling, check every 60 seconds for expiry or revocation. Once inactive status is confirmed, invalidate the timer. Failed reads retain monitoring for a previously active session until its end can be confirmed. Stop still requires one second of consistent inactive status before completing.

@@ -59,6 +59,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastFinish = Date.distantPast
     var stoppedSince: TimeInterval?
     var timer: Timer?
+    var monitoringSession = false
     var lastReport = ""
     var verificationStage = 0
     #if VERIFICATION
@@ -114,6 +115,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if nativeMenu["end administrator access"] != nil { state = .active }
         else if nativeMenu["request administrator access"] != nil { state = .inactive }
         else { state = .unknown }
+        if state == .active { monitoringSession = true }
+        else if state == .inactive { monitoringSession = false }
         if state != .inactive { stoppedSince = nil }
         if let operation {
             if Date() > deadline {
@@ -218,12 +221,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func updateMenu() {
         let busy = operation != nil
-        let interval = busy ? 0.1 : 0.5
+        let interval: TimeInterval? = busy ? 0.1 : monitoringSession ? 60 : nil
         if timer?.timeInterval != interval {
             timer?.invalidate()
-            let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
-            self.timer = timer
-            RunLoop.main.add(timer, forMode: .common)
+            timer = nil
+            if let interval {
+                let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
+                self.timer = timer
+                RunLoop.main.add(timer, forMode: .common)
+            }
         }
         if let operation { action.title = operation == .enable ? "Enabling Admin…" : "Stopping Admin…" }
         else {
@@ -254,10 +260,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSLog("VERIFY FAILED: unavailable or timed out; check ABR for a pending or active session")
             exit(EXIT_FAILURE)
         }
+        let expectedInterval: TimeInterval? = operation != nil ? 0.1 : state == .active ? 60 : nil
+        guard state == .unknown || timer?.timeInterval == expectedInterval else {
+            fail("Unexpected polling interval during verification.")
+            return
+        }
         guard operation == nil else { return }
         switch verificationStage {
         case 0:
-            if state == .unknown { return }
+            if state == .unknown {
+                fail("Cannot establish the initial session status for verification.")
+                return
+            }
             guard state == .inactive else {
                 verificationStage = -1
                 NSLog("VERIFY REFUSED: start from an inactive session")
