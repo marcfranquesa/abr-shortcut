@@ -68,10 +68,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         action.target = self
         menu.addItem(action)
-        menu.addItem(.separator())
-        let show = NSMenuItem(title: "Show Admin By Request", action: #selector(showABR), keyEquivalent: "")
-        show.target = self
-        menu.addItem(show)
         item.menu = menu
         tick()
         timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
@@ -282,18 +278,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if operation == .enable { requestAdmin() }
         updateMenu()
         return operation == requested
-    }
-    @objc func showABR() {
-        if let (app, windows) = snapshot() {
-            NSApp.yieldActivation(to: app)
-            app.activate()
-            if let window = windows.first {
-                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            }
-        } else if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: abrID) {
-            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
-        }
     }
     func requestAdmin() {
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: abrID) else {
