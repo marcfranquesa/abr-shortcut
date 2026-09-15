@@ -230,7 +230,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastReport = action.title
         }
         if verifying { DispatchQueue.main.async { self.verifyCycle() } }
-        let symbol = busy ? "ellipsis.circle" : state == .active ? "checkmark.shield.fill" : "shield"
+        let symbol = busy ? "ellipsis.circle" : state == .active ? "person.fill" : "person"
         item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ABR Shortcut: \(action.title)")
         item.button?.toolTip = "ABR Shortcut — \(action.title)"
     }

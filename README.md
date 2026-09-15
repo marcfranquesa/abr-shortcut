@@ -1,6 +1,6 @@
 # ABR Shortcut
 
-A tiny Swift menu-bar app for Admin By Request on macOS. The shield menu switches between **Enable Admin** and **Stop Admin** as the session changes.
+A tiny Swift menu-bar app for Admin By Request on macOS. The person menu icon is outlined when inactive and filled when admin is enabled. Its action switches between **Enable Admin** and **Stop Admin** as the session changes.
 
 - Enable fills `Update/install applications`, confirms the known prompts, and minimizes the timer.
 - Stop confirms **Finish → Yes**. No extra confirmation in the wrapper.
