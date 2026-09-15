@@ -50,11 +50,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var deadline = Date.distantPast
     var typedReason = false
     var submittedReason = false
-    var clickedFinish = false
+    var lastFinish = Date.distantPast
     var stoppedSamples = 0
     var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
         menu.delegate = self
         menu.autoenablesItems = false
         action.target = self
@@ -89,7 +90,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func tick() {
         guard let (app, windows) = snapshot() else {
             state = NSRunningApplication.runningApplications(withBundleIdentifier: abrID).isEmpty ? .unavailable : .unknown
-            if operation != nil { fail("Cannot read Admin By Request. Check that it is running and Accessibility is allowed.") }
+            if operation != nil && (state == .unavailable || !AXIsProcessTrusted() || Date() > deadline) {
+                fail("Cannot read Admin By Request. Check that it is running and Accessibility is allowed.")
+            }
             updateMenu()
             return
         }
@@ -111,7 +114,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .enable:
             if let session {
                 guard AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success else {
-                    throw Failure.message("Admin is enabled, but the timer could not be minimized.")
+                    return
                 }
                 self.operation = nil
                 return
@@ -126,7 +129,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let fields = descendants(window).filter { string($0, kAXRoleAttribute) == kAXTextFieldRole }
                     guard fields.count == 1 else { throw Failure.message("The reason form has changed; please complete it in Admin By Request.") }
                     if !typedReason {
-                        app.activate()
+                        if !app.isActive {
+                            NSApp.yieldActivation(to: app)
+                            app.activate()
+                            return
+                        }
                         guard AXUIElementSetAttributeValue(fields[0], kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success else {
                             throw Failure.message("Could not focus the reason field.")
                         }
@@ -134,17 +141,21 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         guard let focused = attribute(root, kAXFocusedUIElementAttribute), CFEqual(focused, fields[0]) else {
                             throw Failure.message("The reason field did not receive focus.")
                         }
+                        guard AXUIElementSetAttributeValue(fields[0], kAXValueAttribute as CFString, "" as CFString) == .success else {
+                            throw Failure.message("Could not clear the previous reason.")
+                        }
                         // AX value writes do not trigger this form's validation. Send text to ABR's PID only.
                         sendReason(to: app.processIdentifier)
                         typedReason = true
                         return
                     }
                     guard string(fields[0], kAXValueAttribute) == "Update/install applications" else {
-                        throw Failure.message("The reason was not entered correctly; please check the form.")
+                        return
                     }
                     if let ok = button(window, "OK"), attribute(ok, kAXEnabledAttribute) as? Bool == true {
                         try press(ok)
                         submittedReason = true
+                        deadline = Date().addingTimeInterval(600)
                         return
                     }
                 }
@@ -155,10 +166,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 stoppedSamples = 0
             } else if let session {
                 stoppedSamples = 0
-                if !clickedFinish, let finish = button(session, "Finish") {
+                if attribute(session, kAXMinimizedAttribute) as? Bool == true {
                     AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                    return
+                }
+                if Date().timeIntervalSince(lastFinish) > 2, let finish = button(session, "Finish") {
                     try press(finish)
-                    clickedFinish = true
+                    lastFinish = Date()
                 }
             } else {
                 // Require consecutive observations so a window transition isn't reported as completion.
@@ -170,17 +184,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func sendReason(to pid: pid_t) {
         let source = CGEventSource(stateID: .privateState)
-        for down in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
-            event?.flags = .maskCommand
-            event?.postToPid(pid)
-        }
-        let text = Array("Update/install applications".utf16)
-        for down in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
-            event?.flags = []
-            text.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress!) }
-            event?.postToPid(pid)
+        // Keep each Unicode event short; no layout-dependent select-all shortcut.
+        for character in "Update/install applications" {
+            let text = Array(String(character).utf16)
+            for down in [true, false] {
+                let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
+                event?.flags = []
+                text.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress!) }
+                event?.postToPid(pid)
+            }
         }
     }
 
@@ -209,12 +221,24 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         deadline = Date().addingTimeInterval(30)
         typedReason = false
         submittedReason = false
-        clickedFinish = false
+        lastFinish = .distantPast
         stoppedSamples = 0
-        if operation == .enable { showABR() }
+        if operation == .enable { requestAdmin() }
         updateMenu()
     }
     @objc func showABR() {
+        if let (app, windows) = snapshot() {
+            NSApp.yieldActivation(to: app)
+            app.activate()
+            if let window = windows.first {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            }
+        } else if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: abrID) {
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+    func requestAdmin() {
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: abrID) else {
             fail("Admin By Request is not installed.")
             return
@@ -233,11 +257,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func fail(_ message: String) {
         operation = nil
         updateMenu()
-        let alert = NSAlert()
-        alert.messageText = "ABR Shortcut"
-        alert.informativeText = message
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "ABR Shortcut"
+            alert.informativeText = message
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 }
 
