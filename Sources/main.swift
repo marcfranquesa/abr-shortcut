@@ -33,11 +33,17 @@ func hasText(_ window: AXUIElement, _ text: String) -> Bool {
     }
 }
 func press(_ element: AXUIElement) throws {
-    guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
-        throw Failure.message("Could not click an Admin By Request control.")
+    let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+    switch result {
+    case .success: return
+    case .invalidUIElement:
+        // ABR can replace a control between reading it and clicking it.
+        throw Failure.retry(result)
+    default:
+        throw Failure.message("Could not click an Admin By Request control (\(result.rawValue)).")
     }
 }
-enum Failure: Error { case message(String) }
+enum Failure: Error { case message(String), retry(AXError) }
 enum SessionState { case unavailable, permissionRequired, unknown, inactive, active }
 enum Operation { case enable, stop }
 
@@ -51,7 +57,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var typedReason = false
     var submittedReason = false
     var lastFinish = Date.distantPast
-    var stoppedSamples = 0
+    var stoppedSince: TimeInterval?
     var timer: Timer?
     var lastReport = ""
     var verificationStage = 0
@@ -70,8 +76,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(action)
         item.menu = menu
         tick()
-        timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
-        RunLoop.main.add(timer!, forMode: .common)
     }
 
     func menuWillOpen(_ menu: NSMenu) { tick() }
@@ -84,16 +88,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return (app, windows)
     }
 
-    func menuItem(_ app: NSRunningApplication, _ title: String) -> AXUIElement? {
+    func menuItems(_ app: NSRunningApplication) -> [String: AXUIElement] {
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        guard let value = attribute(root, "AXExtrasMenuBar"), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        return descendants(value as! AXUIElement).first {
-            string($0, kAXRoleAttribute) == kAXMenuItemRole && string($0, kAXTitleAttribute).lowercased() == title.lowercased()
+        guard let value = attribute(root, "AXExtrasMenuBar"), CFGetTypeID(value) == AXUIElementGetTypeID() else { return [:] }
+        var items: [String: AXUIElement] = [:]
+        for element in descendants(value as! AXUIElement) where string(element, kAXRoleAttribute) == kAXMenuItemRole {
+            let title = string(element, kAXTitleAttribute).lowercased()
+            if items[title] == nil { items[title] = element }
         }
+        return items
     }
 
     func tick() {
         guard let (app, windows) = snapshot() else {
+            stoppedSince = nil
             state = !AXIsProcessTrusted() ? .permissionRequired :
                 NSRunningApplication.runningApplications(withBundleIdentifier: abrID).isEmpty ? .unavailable : .unknown
             if operation != nil && (state == .unavailable || !AXIsProcessTrusted() || Date() > deadline) {
@@ -102,28 +110,32 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateMenu()
             return
         }
-        let session = windows.first { string($0, kAXTitleAttribute) == "Administrator Access" && button($0, "Finish") != nil }
-        if menuItem(app, "End administrator access") != nil { state = .active }
-        else if menuItem(app, "Request administrator access") != nil { state = .inactive }
+        let nativeMenu = menuItems(app)
+        if nativeMenu["end administrator access"] != nil { state = .active }
+        else if nativeMenu["request administrator access"] != nil { state = .inactive }
         else { state = .unknown }
+        if state != .inactive { stoppedSince = nil }
         if let operation {
             if Date() > deadline {
                 fail("The operation has not completed. Check Admin By Request for authentication, approval, or an unfamiliar prompt.")
             } else {
-                do { try advance(operation, app: app, windows: windows, session: session) }
+                do { try advance(operation, app: app, windows: windows, nativeMenu: nativeMenu) }
+                catch Failure.retry(let error) {
+                    if verifying { NSLog("VERIFY: refreshing controls after AX error %d", error.rawValue) }
+                }
                 catch { fail("Could not complete the action: \(error)") }
             }
         }
         updateMenu()
     }
 
-    func advance(_ operation: Operation, app: NSRunningApplication, windows: [AXUIElement], session: AXUIElement?) throws {
+    func advance(_ operation: Operation, app: NSRunningApplication, windows: [AXUIElement], nativeMenu: [String: AXUIElement]) throws {
         switch operation {
         case .enable:
             if state == .active {
-                if menuItem(app, "Show timer window") != nil {
+                if nativeMenu["show timer window"] != nil {
                     self.operation = nil
-                } else if let session {
+                } else if let session = windows.first(where: { string($0, kAXTitleAttribute) == "Administrator Access" && button($0, "Finish") != nil }) {
                     _ = AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
                 }
                 return
@@ -172,17 +184,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .stop:
             if let confirmation = windows.first(where: { hasText($0, "Are you done with your administrator session?") }), let yes = button(confirmation, "Yes") {
                 try press(yes)
-                stoppedSamples = 0
+                stoppedSince = nil
             } else if state == .active {
-                stoppedSamples = 0
-                if Date().timeIntervalSince(lastFinish) > 2, let end = menuItem(app, "End administrator access") {
+                if Date().timeIntervalSince(lastFinish) > 0.5, let end = nativeMenu["end administrator access"] {
                     try press(end)
                     lastFinish = Date()
                 }
             } else if state == .inactive {
-                // Require consecutive observations so a window transition isn't reported as completion.
-                stoppedSamples += 1
-                if stoppedSamples >= 3 { self.operation = nil }
+                // Preserve the one-second confirmation even when polling faster.
+                let now = ProcessInfo.processInfo.systemUptime
+                if let stoppedSince {
+                    if now - stoppedSince >= 1 { self.operation = nil }
+                } else {
+                    stoppedSince = now
+                }
             }
         }
     }
@@ -203,6 +218,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func updateMenu() {
         let busy = operation != nil
+        let interval = busy ? 0.1 : 0.5
+        if timer?.timeInterval != interval {
+            timer?.invalidate()
+            let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
+            self.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
         if let operation { action.title = operation == .enable ? "Enabling Admin…" : "Stopping Admin…" }
         else {
             switch state {
@@ -217,11 +239,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if action.title != lastReport {
             NSLog("ABR Shortcut: %@", action.title)
             lastReport = action.title
+            let symbol = busy ? "ellipsis.circle" : state == .active ? "person.fill" : "person"
+            item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ABR Shortcut: \(action.title)")
+            item.button?.toolTip = "ABR Shortcut — \(action.title)"
         }
         if verifying { DispatchQueue.main.async { self.verifyCycle() } }
-        let symbol = busy ? "ellipsis.circle" : state == .active ? "person.fill" : "person"
-        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ABR Shortcut: \(action.title)")
-        item.button?.toolTip = "ABR Shortcut — \(action.title)"
     }
 
     // Explicit opt-in smoke test; refuse to disturb a pre-existing admin session.
@@ -243,7 +265,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if begin(.enable) { verificationStage = 1 }
         case 1:
-            guard state == .active, let (app, _) = snapshot(), menuItem(app, "Show timer window") != nil else { return }
+            guard state == .active, let (app, _) = snapshot(), menuItems(app)["show timer window"] != nil else { return }
             NSLog("VERIFY: enabled and timer minimized")
             if begin(.stop) { verificationStage = 2 }
         case 2:
@@ -274,7 +296,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         typedReason = false
         submittedReason = false
         lastFinish = .distantPast
-        stoppedSamples = 0
+        stoppedSince = nil
         if operation == .enable { requestAdmin() }
         updateMenu()
         return operation == requested
