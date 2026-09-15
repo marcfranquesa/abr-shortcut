@@ -1,24 +1,25 @@
 # ABR Shortcut
 
-Small macOS launchers for Admin By Request:
+A tiny Swift menu-bar app for Admin By Request on macOS. The shield menu switches between **Enable Admin** and **Stop Admin** as the session changes.
 
-- **Enable Admin** clicks through the known request prompts, enters `Update/install applications`, and minimizes the session timer.
-- **Stop Admin** clicks **Finish → Yes** to end the session.
+- Enable fills `Update/install applications`, confirms the known prompts, and minimizes the timer.
+- Stop confirms **Finish → Yes**. No extra confirmation in the wrapper.
+- Status refreshes every half-second, including sessions changed in ABR itself.
 
-## Build and use
+## Build and run
 
-Requires macOS and Admin By Request. No third-party build dependencies.
+Requires macOS, Xcode Command Line Tools, and Admin By Request.
 
 ```sh
 ./build.sh
 ```
 
-Move the apps from `build/` to a stable location such as `~/Applications`, then drag them into the Dock for one-click use. Allow each app to control System Events when prompted, and enable it under **System Settings → Privacy & Security → Accessibility**.
+Move `build/ABR Shortcut.app` to `~/Applications` and open it. Choose **Allow Accessibility…** from its menu and enable **ABR Shortcut** in System Settings once. Rebuilt, locally signed apps may need permission granted again.
 
-Edit `requestReason` in `enable-admin.applescript` to change the default reason, then rebuild.
+ABR Shortcut runs alongside ABR and depends on it for privileges, policy, authentication, and auditing. Quitting the shortcut does not end an admin session. It does not uninstall or disable ABR.
 
-## Status
+## Scope
 
-Prototype targeting the English Admin By Request 5.3.4 dialogs on this Mac, including its exact BITS approval notice. Other versions or organization prompts may need script changes. Authentication and IT approval remain handled by Admin By Request.
+Targets the English ABR 5.3.4 dialogs on this Mac, including the exact BITS approval notice. Unknown prompts and authentication need attention in ABR. Status comes from ABR's accessible session window; unavailable Accessibility access is reported as unknown.
 
-Both scripts compile and the individual UI actions were checked. The packaged launchers still need an end-to-end test with Accessibility permission enabled.
+The Swift app has no third-party dependencies.

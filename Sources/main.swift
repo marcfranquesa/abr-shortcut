@@ -1,0 +1,248 @@
+import AppKit
+import ApplicationServices
+
+let abrID = "com.fasttracksoftware.adminbyrequest"
+let approvalNotice = """
+Your request for temporary administrator permission has been approved. After clicking OK, you will become administrator on your computer for a limited time, and a small countdown window will appear on the lower right side of your screen.
+
+Please note that during the admin session, actions will be logged in the BITS system. Activity should be consistent with the Broad IT Acceptable Use policy (broad.io/AcceptableUse). If you have questions or concerns about this, please cancel this request and reach out to BITS (broad.io/help).
+"""
+
+func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    return value
+}
+func string(_ element: AXUIElement, _ name: String) -> String {
+    attribute(element, name) as? String ?? ""
+}
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+}
+func descendants(_ element: AXUIElement, depth: Int = 0) -> [AXUIElement] {
+    guard depth < 10 else { return [] }
+    return [element] + children(element).flatMap { descendants($0, depth: depth + 1) }
+}
+func button(_ window: AXUIElement, _ title: String) -> AXUIElement? {
+    descendants(window).first { string($0, kAXRoleAttribute) == kAXButtonRole && string($0, kAXTitleAttribute) == title }
+}
+func hasText(_ window: AXUIElement, _ text: String) -> Bool {
+    descendants(window).contains {
+        string($0, kAXRoleAttribute) == kAXStaticTextRole &&
+        (string($0, kAXValueAttribute) == text || string($0, kAXTitleAttribute) == text)
+    }
+}
+func press(_ element: AXUIElement) throws {
+    guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
+        throw Failure.message("Could not click an Admin By Request control.")
+    }
+}
+enum Failure: Error { case message(String) }
+enum SessionState { case unavailable, unknown, inactive, active }
+enum Operation { case enable, stop }
+
+final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    let menu = NSMenu()
+    let action = NSMenuItem(title: "Checking status…", action: #selector(toggle), keyEquivalent: "")
+    var state = SessionState.unknown
+    var operation: Operation?
+    var deadline = Date.distantPast
+    var typedReason = false
+    var submittedReason = false
+    var clickedFinish = false
+    var stoppedSamples = 0
+    var timer: Timer?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        menu.delegate = self
+        menu.autoenablesItems = false
+        action.target = self
+        menu.addItem(action)
+        menu.addItem(.separator())
+        let permission = NSMenuItem(title: "Allow Accessibility…", action: #selector(allowAccessibility), keyEquivalent: "")
+        permission.target = self
+        menu.addItem(permission)
+        let show = NSMenuItem(title: "Show Admin By Request", action: #selector(showABR), keyEquivalent: "")
+        show.target = self
+        menu.addItem(show)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit ABR Shortcut", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        item.menu = menu
+        tick()
+        timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer!, forMode: .common)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) { tick() }
+
+    func snapshot() -> (NSRunningApplication, [AXUIElement])? {
+        guard AXIsProcessTrusted(), let app = NSRunningApplication.runningApplications(withBundleIdentifier: abrID).first else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.3)
+        guard let windows = attribute(root, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+        return (app, windows)
+    }
+
+    func tick() {
+        guard let (app, windows) = snapshot() else {
+            state = NSRunningApplication.runningApplications(withBundleIdentifier: abrID).isEmpty ? .unavailable : .unknown
+            if operation != nil { fail("Cannot read Admin By Request. Check that it is running and Accessibility is allowed.") }
+            updateMenu()
+            return
+        }
+        let session = windows.first { string($0, kAXTitleAttribute) == "Administrator Access" && button($0, "Finish") != nil }
+        state = session == nil ? .inactive : .active
+        if let operation {
+            if Date() > deadline {
+                fail("The operation has not completed. Check Admin By Request for authentication, approval, or an unfamiliar prompt.")
+            } else {
+                do { try advance(operation, app: app, windows: windows, session: session) }
+                catch { fail("Could not complete the action: \(error)") }
+            }
+        }
+        updateMenu()
+    }
+
+    func advance(_ operation: Operation, app: NSRunningApplication, windows: [AXUIElement], session: AXUIElement?) throws {
+        switch operation {
+        case .enable:
+            if let session {
+                guard AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success else {
+                    throw Failure.message("Admin is enabled, but the timer could not be minimized.")
+                }
+                self.operation = nil
+                return
+            }
+            for window in windows {
+                let title = string(window, kAXTitleAttribute)
+                if title == "Instructions" {
+                    if hasText(window, "Do you want to start an administrator session?"), let yes = button(window, "Yes") { try press(yes); return }
+                    if hasText(window, approvalNotice), let ok = button(window, "OK") { try press(ok); return }
+                }
+                if title == "Request Administrator Access", !submittedReason {
+                    let fields = descendants(window).filter { string($0, kAXRoleAttribute) == kAXTextFieldRole }
+                    guard fields.count == 1 else { throw Failure.message("The reason form has changed; please complete it in Admin By Request.") }
+                    if !typedReason {
+                        app.activate()
+                        guard AXUIElementSetAttributeValue(fields[0], kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success else {
+                            throw Failure.message("Could not focus the reason field.")
+                        }
+                        let root = AXUIElementCreateApplication(app.processIdentifier)
+                        guard let focused = attribute(root, kAXFocusedUIElementAttribute), CFEqual(focused, fields[0]) else {
+                            throw Failure.message("The reason field did not receive focus.")
+                        }
+                        // AX value writes do not trigger this form's validation. Send text to ABR's PID only.
+                        sendReason(to: app.processIdentifier)
+                        typedReason = true
+                        return
+                    }
+                    guard string(fields[0], kAXValueAttribute) == "Update/install applications" else {
+                        throw Failure.message("The reason was not entered correctly; please check the form.")
+                    }
+                    if let ok = button(window, "OK"), attribute(ok, kAXEnabledAttribute) as? Bool == true {
+                        try press(ok)
+                        submittedReason = true
+                        return
+                    }
+                }
+            }
+        case .stop:
+            if let confirmation = windows.first(where: { hasText($0, "Are you done with your administrator session?") }), let yes = button(confirmation, "Yes") {
+                try press(yes)
+                stoppedSamples = 0
+            } else if let session {
+                stoppedSamples = 0
+                if !clickedFinish, let finish = button(session, "Finish") {
+                    AXUIElementSetAttributeValue(session, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                    try press(finish)
+                    clickedFinish = true
+                }
+            } else {
+                // Require consecutive observations so a window transition isn't reported as completion.
+                stoppedSamples += 1
+                if stoppedSamples >= 3 { self.operation = nil }
+            }
+        }
+    }
+
+    func sendReason(to pid: pid_t) {
+        let source = CGEventSource(stateID: .privateState)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
+            event?.flags = .maskCommand
+            event?.postToPid(pid)
+        }
+        let text = Array("Update/install applications".utf16)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
+            event?.flags = []
+            text.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress!) }
+            event?.postToPid(pid)
+        }
+    }
+
+    func updateMenu() {
+        let busy = operation != nil
+        if let operation { action.title = operation == .enable ? "Enabling Admin…" : "Stopping Admin…" }
+        else {
+            switch state {
+            case .active: action.title = "Stop Admin"
+            case .inactive: action.title = "Enable Admin"
+            case .unknown: action.title = "Status unavailable — allow Accessibility"
+            case .unavailable: action.title = "Admin By Request is not running"
+            }
+        }
+        action.isEnabled = !busy && (state == .active || state == .inactive)
+        let symbol = busy ? "ellipsis.circle" : state == .active ? "checkmark.shield.fill" : "shield"
+        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ABR Shortcut: \(action.title)")
+        item.button?.toolTip = "ABR Shortcut — \(action.title)"
+    }
+
+    @objc func toggle() {
+        guard operation == nil else { return }
+        tick()
+        guard state == .active || state == .inactive else { return }
+        operation = state == .active ? .stop : .enable
+        deadline = Date().addingTimeInterval(30)
+        typedReason = false
+        submittedReason = false
+        clickedFinish = false
+        stoppedSamples = 0
+        if operation == .enable { showABR() }
+        updateMenu()
+    }
+    @objc func showABR() {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: abrID) else {
+            fail("Admin By Request is not installed.")
+            return
+        }
+        NSWorkspace.shared.open([URL(string: "adminbyrequest://request-admin")!], withApplicationAt: appURL,
+            configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                if let error { DispatchQueue.main.async { self.fail(error.localizedDescription) } }
+            }
+    }
+    @objc func allowAccessibility() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+    @objc func quit() { NSApp.terminate(nil) }
+    func fail(_ message: String) {
+        operation = nil
+        updateMenu()
+        let alert = NSAlert()
+        alert.messageText = "ABR Shortcut"
+        alert.informativeText = message
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+}
+
+let app = NSApplication.shared
+let controller = Controller()
+app.delegate = controller
+app.setActivationPolicy(.accessory)
+app.run()
