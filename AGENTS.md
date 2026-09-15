@@ -22,6 +22,8 @@ Targets the English ABR 5.3.4 dialogs on this Mac, including the exact BITS appr
 
 The Swift app has no third-party dependencies.
 
+The workflow polls every 0.1 seconds while enabling or stopping, and every 0.5 seconds when idle. Each check reads the native menu once. Stop completes after one second of observed inactive status; an active or unreadable status restarts that check.
+
 ## Verify the flow
 
 Build with `VERIFY_CYCLE=1 ./build.sh` and install that test build. With no active admin session, quit the shortcut using Activity Monitor and run:
